@@ -1,0 +1,55 @@
+# Переменные окружения для Vercel - добавьте эти переменные в настройках проекта на Vercel
+
+# === ОБЯЗАТЕЛЬНЫЕ API КЛЮЧИ ===
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+NOTION_TOKEN=your_notion_token_here  
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+BLOB_READ_WRITE_TOKEN=your_vercel_blob_token_here
+
+# === DATABASE & CACHE ===
+NOTION_DATABASE_ID=your_notion_database_id_here
+KV_REST_API_URL=your_vercel_kv_url_here
+KV_REST_API_TOKEN=your_vercel_kv_token_here
+KV_REST_API_READ_ONLY_TOKEN=your_vercel_kv_readonly_token_here
+
+# === TELEGRAM НАСТРОЙКИ ===
+TELEGRAM_CHANNEL_ID=your_telegram_channel_id_here
+TELEGRAM_THREAD_ID=0
+TELEGRAM_WEBHOOK_SECRET=your_webhook_secret_here
+TELEGRAM_BOT_USERNAME=your_bot_username_here
+TELEGRAM_REVIEWERS=reviewer1,reviewer2
+
+# === SECURITY ===
+NEXTAUTH_SECRET=your_nextauth_secret_here
+NEXT_PUBLIC_APP_URL=https://your-app-domain.vercel.app
+
+# === ОПЦИОНАЛЬНЫЕ НАСТРОЙКИ ===
+ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
+AI_MAX_INPUT_TOKENS=180000
+AI_MAX_IMAGES=10
+PDF_MAX_PAGES=200
+PDF_RENDER_WIDTH=1600
+PDF_MAX_DIAGRAM_PAGES=10
+COST_SOFT_LIMIT_USD=0.5
+
+# === FEATURE FLAGS ===
+AI_COMPRESS_LONG_DOCS=true
+AI_MODEL_DRIVEN_SELECTION=true
+AI_ENABLE_HEURISTICS_FALLBACK=true
+STRICT_ERRORS=true
+ENABLE_OCR=false
+AI_DISABLE_UPLOADS=false
+NEEDS_INFO_ON_COMMENT=true
+
+# === ДОПОЛНИТЕЛЬНО ===
+# ALLOWED_DOC_DOMAINS=docs.example.com,api.example.com
+# NOTION_PROPERTY_MAP={"status":"Status","priority":"Priority"}
+
+# ============================================================
+# КАК НАСТРОИТЬ НА VERCEL:
+# 1. Зайдите в настройки проекта на Vercel
+# 2. Перейдите в раздел "Environment Variables"  
+# 3. Добавьте каждую переменную отдельно
+# 4. Выберите Environment: Production, Preview, Development
+# 5. Нажмите "Save" и сделайте новый деплой
+# ============================================================ 

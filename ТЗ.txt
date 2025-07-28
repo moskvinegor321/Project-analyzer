@@ -1,0 +1,980 @@
+# ULTRA‑FINAL (AI‑first • No‑Hardcode • No‑Hidden‑Fallbacks)
+
+## One‑Shot PROMPT для Cursor: Next.js + Claude Vision + DOCX/PDF + Notion + Telegram + Vercel Blob/KV
+
+> Скопируй **весь документ** в Cursor. Результат — полностью собранный проект, который:
+>
+> * Принимает **DOCX/PDF**, ссылки (ТЗ, квота, Pipedrive, примеры).
+> * Извлекает текст, даёт **модели** выбрать релевантные страницы‑изображения и чанки документации, проводит анализ и возвращает **строгий JSON**.
+> * Создаёт страницу в **Notion**, заполняет свойства, добавляет блоки, **PromptContextLog**.
+> * Публикует пост в **Telegram‑канал** с кнопками **Approve / Reject / Add information**.
+> * Синхронно обновляет **Decision** и служебные поля в Notion при действиях ревьюеров.
+> * Работает с **Vercel Blob** (файлы/изображения) и **Vercel KV** (кэш/заявки), поддерживает **SSE** и строгую политику ошибок.
+>
+> Критично: **никакого хардкода**, **никаких скрытых фолбеков**. Все ID/пороги/ограничения — через **.env** и центральный `config.ts`. Если шаг падает — **процесс останавливается** с явным кодом ошибки.
+
+---
+
+## 0. Принципы и поведение
+
+* **AI‑first.** Выбор страниц изображений, релевантных чанков документации, формирование выводов/блоков — выполняет **модель**. Эвристики — только как явный **fallback** по флагу.
+* **No hardcode.** Никаких зашитых ID Notion/каналов/порогов/имен свойств. Всё — в `.env` и `app/lib/config.ts`.
+* **No hidden fallbacks.** Любая критическая ошибка **останавливает пайплайн**. Следующие шаги (Notion/Telegram) **не выполняются**, пока ошибка не устранена. Включить фолбеки можно **только флагом** окружения.
+* **Idempotent & auditable.** Все операции помечены `requestId`. Состояние, выбор модели и оценки токенов/стоимости фиксируются в **PromptContextLog** (KV + блок в Notion).
+* **Budget guard.** Перед основным вызовом модели оцениваем токены/стоимость. При риске превышения — модель получает задачу **сжать вход** и/или **сократить изображения** в пределах лимитов.
+* **Strict errors.** По умолчанию `STRICT_ERRORS=true`: никакой автопочинки JSON; точный код ошибки в UI и логах. Разрешить одну попытку автоисправления можно только при `STRICT_ERRORS=false`.
+
+### 0.1 Коды ошибок (enum)
+
+```
+UPLOAD_ERROR
+PDF_RENDER_ERROR
+DOC_EXTRACT_ERROR
+DOCS_FETCH_ERROR
+MODEL_INVALID_JSON
+BUDGET_EXCEEDED
+NOTION_ERROR
+TELEGRAM_POST_ERROR
+TELEGRAM_DM_ERROR
+DIAGRAM_ROI_UNSTABLE
+USERNAME_NOT_REGISTERED
+```
+
+---
+
+## 1. Стек и деплой
+
+* **Next.js 14+ (App Router)**, **TypeScript strict**
+* **Tailwind CSS**, **shadcn/ui**
+* **Claude 3.5 Sonnet** (Messages API, **vision**, SSE)
+* **Vercel Blob** — хранение файлов и рендеров страниц
+* **Vercel KV** — кэш документации, результаты, заявки, Telegram users, ожидания ForceReply
+* **Notion API** — страница в базе + свойства + блоки + комментарии (File Upload API — попытаться, fallback на URL)
+* **Telegram Bot API** — канал/топик, инлайн‑кнопки, ForceReply, DM заявителю
+* Деплой: **Vercel**
+
+---
+
+## 2. Структура проекта (создать ровно так)
+
+```
+document-analyzer/
+├── .cursorrules
+├── .gitignore
+├── .env.example
+├── vercel.json
+├── next.config.js
+├── tailwind.config.js
+├── tsconfig.json
+├── components.json
+├── README.md
+├── app/
+│   ├── api/
+│   │   ├── documentation/route.ts
+│   │   ├── analyze/route.ts
+│   │   ├── notion/route.ts
+│   │   └── telegram/
+│   │       ├── webhook/route.ts
+│   │       └── send/route.ts
+│   ├── components/
+│   │   ├── FileUpload.tsx
+│   │   ├── DocumentationInput.tsx
+│   │   ├── ProcessingStatus.tsx
+│   │   ├── AnalysisResult.tsx
+│   │   └── ui/ (shadcn components)
+│   ├── lib/
+│   │   ├── config.ts
+│   │   ├── blob.ts
+│   │   ├── docx.ts
+│   │   ├── pdf.ts
+│   │   ├── diagrams.ts
+│   │   ├── documentation.ts
+│   │   ├── claude.ts
+│   │   ├── notion.ts
+│   │   ├── telegram.ts
+│   │   ├── cache.ts
+│   │   ├── ratelimit.ts
+│   │   ├── security.ts
+│   │   └── utils.ts
+│   ├── types/index.ts
+│   ├── globals.css
+│   ├── layout.tsx
+│   └── page.tsx
+└── public/
+```
+
+---
+
+## 3. Переменные окружения (`.env.example`)
+
+```bash
+# Anthropic
+ANTHROPIC_API_KEY=
+ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
+AI_MAX_INPUT_TOKENS=180000
+AI_MAX_IMAGES=10
+AI_COMPRESS_LONG_DOCS=true
+AI_MODEL_DRIVEN_SELECTION=true
+AI_ENABLE_HEURISTICS_FALLBACK=false
+STRICT_ERRORS=true
+COST_SOFT_LIMIT_USD=0.50
+AI_DISABLE_UPLOADS=false
+
+# Notion
+NOTION_TOKEN=
+NOTION_DATABASE_ID=
+# JSON-мэп имён свойств → реальным названиям в базе (если отличаются)
+# пример: {"Name":"Name","Feasibility":"Feasibility","Decision":"Decision"}
+NOTION_PROPERTY_MAP={}
+
+# Telegram
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHANNEL_ID=
+TELEGRAM_THREAD_ID=0
+TELEGRAM_WEBHOOK_SECRET=
+TELEGRAM_BOT_USERNAME=
+# Список ревьюров через запятую: @user1,@user2
+TELEGRAM_REVIEWERS=
+
+# Vercel Blob
+BLOB_READ_WRITE_TOKEN=
+
+# Vercel KV 
+KV_REST_API_URL=
+KV_REST_API_TOKEN=
+KV_REST_API_READ_ONLY_TOKEN=
+
+# PDF Processing
+PDF_MAX_PAGES=200
+PDF_RENDER_WIDTH=1600
+PDF_MAX_DIAGRAM_PAGES=10
+ENABLE_OCR=false
+
+# Security / Service
+ALLOWED_DOC_DOMAINS=
+NEXT_PUBLIC_APP_URL=
+NEXTAUTH_SECRET=
+# Управление статусом при комментарии
+NEEDS_INFO_ON_COMMENT=true
+```
+
+---
+
+## 4. Типы данных (строго)
+
+```ts
+export type ErrorCode =
+  | 'UPLOAD_ERROR'
+  | 'PDF_RENDER_ERROR'
+  | 'DOC_EXTRACT_ERROR'
+  | 'DOCS_FETCH_ERROR'
+  | 'MODEL_INVALID_JSON'
+  | 'BUDGET_EXCEEDED'
+  | 'NOTION_ERROR'
+  | 'TELEGRAM_POST_ERROR'
+  | 'TELEGRAM_DM_ERROR'
+  | 'DIAGRAM_ROI_UNSTABLE'
+  | 'USERNAME_NOT_REGISTERED';
+
+export interface DiagramFinding {
+  page: number;
+  type: 'diagram' | 'chart' | 'table' | 'unknown';
+  description: string;
+  implications: string;
+  imageUrl?: string;
+  bbox?: { x: number; y: number; w: number; h: number };
+}
+
+export interface AnalysisResult {
+  feasibility: 'high' | 'medium' | 'low' | 'unknown';
+  comments: string;
+  missingRequirements: string[];
+  estimatedTimeline: string;
+  confidence: number; // 0..1
+  documentSummary: string;
+  diagramFindings?: DiagramFinding[];
+  notionBlocks?: any[];
+  process?: string;
+  documentTypes?: string[];
+  fieldsToExtract?: string[];
+  volumePages?: { min?: number; max?: number; raw: string };
+  arrRub?: number | null;
+  acvRub?: number | null;
+  placement?: 'Cloud' | 'On-prem' | 'Hybrid' | 'Unknown';
+  securityTags?: string[];
+  links?: { quota?: string; tz?: string; pipedrive?: string; examples?: string; blob?: string };
+}
+
+export interface PromptContextLog {
+  docSummaryUsed: string;
+  selectedDocChunks: Array<{ id: string; title: string; reason: string }>;
+  selectedImages: Array<{ page: number; url: string; reason: string }>;
+  tokenEstimate: { input: number; output?: number };
+  costEstimateUsd?: number;
+  autoFixed?: boolean;
+}
+
+export interface SubmissionPayload {
+  projectName: string;
+  telegramUsername: string; // '@nick' или 'nick'
+  documentationUrls: string[];
+  tzLink?: string;
+  quotaLink: string;
+  pipedriveLink?: string;
+  examplesLink?: string;
+  blobUrl: string;
+  fileName: string;
+}
+
+export interface ReviewRequest extends SubmissionPayload {
+  id: string;
+  createdAt: number;
+  status: 'pending' | 'approved' | 'rejected' | 'needs-info' | 'completed' | 'error';
+  notionPageId?: string;
+  notionUrl?: string;
+  analysis?: AnalysisResult;
+  requester: { username: string; userId?: number };
+  telegram: { channelMessageId?: number; threadId?: number };
+}
+
+export interface ApiErrorResponse {
+  ok: false;
+  code: ErrorCode;
+  message: string;
+}
+
+export interface ProcessingStatus {
+  stage: 'uploading' | 'processing-docx' | 'processing-pdf' | 'selecting-images' | 'fetching-docs' | 'selecting-chunks' | 'analyzing' | 'creating-notion' | 'posting-telegram' | 'completed' | 'error';
+  progress: number; // 0-100
+  message: string;
+  error?: { code: ErrorCode; details: string };
+}
+```
+
+---
+
+## 5. Конфигурационные файлы
+
+### 5.1 .cursorrules
+```markdown
+# Document Analyzer AI-First Project Rules
+
+## Архитектура
+- Next.js 14+ App Router ТОЛЬКО
+- TypeScript strict mode обязательно
+- Все типы в app/types/index.ts
+- Конфигурация в app/lib/config.ts
+- Никакого хардкода - все через env переменные
+
+## AI-First подход
+- Выбор изображений/чанков ВСЕГДА через модель
+- Эвристики только как fallback по флагу
+- Строгая валидация JSON ответов модели
+- Budget guard перед каждым вызовом модели
+
+## Error Handling
+- Enum коды ошибок
+- STRICT_ERRORS=true по умолчанию - без автофиксов
+- Любая критическая ошибка останавливает процесс
+- Полное логирование в KV и Notion
+
+## API Design
+- SSE для длительных операций
+- Идемпотентность через requestId
+- Валидация всех входящих данных
+- Proper HTTP status codes
+
+## Security
+- Telegram webhook secret проверка
+- CORS только для своего домена
+- Санитизация всех пользовательских данных
+- Никаких токенов на клиенте
+
+## Styling
+- Tailwind CSS классы только
+- shadcn/ui компоненты
+- Responsive design обязательно
+- Dark/light theme support
+```
+
+### 5.2 .gitignore
+```gitignore
+# Dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# Testing
+/coverage
+
+# Next.js
+/.next/
+/out/
+
+# Production
+/build
+
+# Environment variables
+.env
+.env*.local
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage/
+*.lcov
+
+# Optional cache
+.npm
+.eslintcache
+
+# Temporary
+tmp/
+temp/
+/uploads
+/temp-files
+```
+
+### 5.3 vercel.json
+```json
+{
+  "functions": {
+    "app/api/analyze/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/documentation/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/telegram/webhook/route.ts": {
+      "maxDuration": 30
+    }
+  },
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' https:"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### 5.4 next.config.js
+```javascript
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  experimental: {
+    serverComponentsExternalPackages: ['pdfjs-dist', 'mammoth', 'sharp']
+  },
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: '*.vercel-storage.com',
+      },
+    ],
+  },
+  webpack: (config) => {
+    config.resolve.alias.canvas = false;
+    config.resolve.alias.encoding = false;
+    return config;
+  },
+}
+
+module.exports = nextConfig
+```
+
+---
+
+## 6. Notion: схема, маппинг и лог
+
+### 6.1 Свойства базы (рекомендуемый набор)
+
+* **Name** *(title)*
+* **Requester** *(rich\_text)* — `@username`
+* **Telegram User ID** *(number)*
+* **Feasibility** *(select: High/Medium/Low/Unknown)*
+* **Confidence** *(number)*
+* **Timeline** *(rich\_text)*
+* **Process** *(rich\_text)*
+* **Document types** *(multi\_select)*
+* **Fields to extract** *(rich\_text)*
+* **Volume, pages** *(number)*
+* **ARR (RUB)** *(number)*
+* **ACV (RUB)** *(number)*
+* **Placement** *(select: Cloud/On-prem/Hybrid/Unknown)*
+* **Security / Compliance** *(multi\_select)*
+* **Quota Link** *(url)*
+* **TZ Link** *(url)*
+* **Pipedrive Link** *(url)*
+* **Examples Link** *(url)*
+* **Blob File URL** *(url)*
+* **Decision** *(select: Pending/Approved/Rejected/Needs info/Error)*
+* **Channel Message ID** *(number)*
+* **Thread ID** *(number)*
+* **Last Action** *(select: Approve/Reject/Add info/Comment)*
+* **Last Action At** *(date)*
+* **Last Moderator (TG)** *(rich\_text)*
+
+### 6.2 Контент (children blocks)
+
+1. **Summary**
+2. **Feasibility & Risks**
+3. **Timeline**
+4. **Volumes / Workload**
+5. **Document Types & Required Fields**
+6. **Security / IB requirements**
+7. **Output format / Integration**
+8. **Diagram findings**
+9. **Links**
+10. **Telegram log**
+11. **Prompt context log** — выбранные чанки/страницы, причины, токены/стоимость, `autoFixed`.
+
+### 6.3 Маппинг через JSON
+
+`NOTION_PROPERTY_MAP` — JSON вида:
+
+```json
+{
+  "Name": "Name",
+  "Requester": "Requester",
+  "Telegram User ID": "Telegram User ID",
+  "Feasibility": "Feasibility",
+  "Confidence": "Confidence",
+  "Timeline": "Timeline",
+  "Process": "Process",
+  "Document types": "Document types",
+  "Fields to extract": "Fields to extract",
+  "Volume, pages": "Volume, pages",
+  "ARR (RUB)": "ARR (RUB)",
+  "ACV (RUB)": "ACV (RUB)",
+  "Placement": "Placement",
+  "Security / Compliance": "Security / Compliance",
+  "Quota Link": "Quota Link",
+  "TZ Link": "TZ Link",
+  "Pipedrive Link": "Pipedrive Link",
+  "Examples Link": "Examples Link",
+  "Blob File URL": "Blob File URL",
+  "Decision": "Decision",
+  "Channel Message ID": "Channel Message ID",
+  "Thread ID": "Thread ID",
+  "Last Action": "Last Action",
+  "Last Action At": "Last Action At",
+  "Last Moderator (TG)": "Last Moderator (TG)"
+}
+```
+
+---
+
+## 7. Telegram: синхронизация статусов
+
+### 7.1 Сообщение в канал (Markdown)
+
+Собирается по шаблону из раздела **15**. Добавить теги ревьюеров (`TELEGRAM_REVIEWERS`) и заявителя `@username`.
+
+### 7.2 Кнопки
+
+`Approve` · `Reject` · `Add information`
+
+* `callback_data = act:<requestId>:<approve|reject|add>`
+
+### 7.3 Маппинг действий → Notion
+
+| Действие                | Decision                                                                | Last Action | Last Action At | Last Moderator (TG) |
+| ----------------------- | ----------------------------------------------------------------------- | ----------- | -------------- | ------------------- |
+| Approve                 | **Approved**                                                            | Approve     | now()          | `@username`         |
+| Reject                  | **Rejected**                                                            | Reject      | now()          | `@username`         |
+| Add information → текст | **Needs info** *(если `NEEDS_INFO_ON_COMMENT=true`)*                    | Add info    | now()          | `@username`         |
+| Ответ без кнопки        | `Needs info` *(если `NEEDS_INFO_ON_COMMENT=true`), иначе без изменения* | Comment     | now()          | `@username`         |
+| Ошибка TG постинга      | **Error**                                                               | Comment     | now()          | `@bot`              |
+
+### 7.4 Вебхук и безопасность
+
+* Эндпойнт: `POST /api/telegram/webhook`.
+* Проверять `X-Telegram-Bot-Api-Secret-Token == TELEGRAM_WEBHOOK_SECRET`.
+* Обрабатывать `message` (регистрация `/start`, ForceReply) и `callback_query`.
+* Все DM/посты — только сервером. В `/api/telegram/send` требовать заголовок `X-Internal-Secret: NEXTAUTH_SECRET`.
+
+---
+
+## 8. Обработка DOCX/PDF (AI‑выбор изображений)
+
+### 8.1 DOCX
+
+* Серверная обработка: `mammoth` → HTML → `turndown` → Markdown.
+
+### 8.2 PDF
+
+* Серверная обработка: `pdfjs-dist` → извлечь текст, подсчитать `textChars` по страницам.
+* Клиентская отрисовка: Canvas API для рендера страниц с `PDF_RENDER_WIDTH`, конвертация в Blob.
+* **Модельный выбор**: передать модели список всех страниц `{ index, textChars, url }` и лимиты `{ maxImages, maxInputTokens, softUsdLimit }`. Модель возвращает `selected[]` и `reason` для каждой.
+* **Fallback‑эвристики** (только если явно включено): пороги по соотношению текст/графика.
+* ROI detection (опционально): только по флагу; при нестабильности — `DIAGRAM_ROI_UNSTABLE`.
+
+---
+
+## 9. Документация: загрузка и выбор чанков
+
+* `POST /api/documentation` — принимает список URL.
+* Загружать, очищать (cheerio), конвертировать в Markdown (turndown).
+* Разбивка на чанки по `h1/h2` или размеру 8–12k символов.
+* **Модельный выбор**: передать список чанков `{ id, title, size, preview }` и попросить выбрать релевантные (с `reason`). Затем в основной анализ передать **полный текст выбранных чанков**.
+* Кэшировать в KV с TTL 24h.
+
+---
+
+## 10. Claude: промпты и валидация
+
+### 10.1 Вызов 1 — выбор изображений PDF
+
+В `content` передаётся список страниц и бюджет. Ожидаемый ответ:
+
+```json
+{
+  "selected": [ { "page": 12, "reason": "Архитектура интеграций с диаграммами" } ],
+  "skip": [ { "page": 3, "reason": "Повторяющийся текст без схем" } ]
+}
+```
+
+### 10.2 Вызов 2 — выбор чанков документации
+
+Ответ:
+
+```json
+{ 
+  "selected": [ 
+    { "id": "h2-auth", "reason": "совпадение требований по аутентификации" } 
+  ] 
+}
+```
+
+### 10.3 Вызов 3 — итоговый анализ (строгий JSON)
+
+Передать: сокращённый текст документа (если нужен компресс), **полные тексты выбранных чанков**, изображения выбранных страниц. Вернуть **строго** `AnalysisResult`.
+
+### 10.4 Валидатор
+
+* `zod`‑схема для `AnalysisResult`.
+* `STRICT_ERRORS=true` — **без автоисправлений** → при ошибке `MODEL_INVALID_JSON`.
+* `STRICT_ERRORS=false` — одна попытка автофикса; зафиксировать `autoFixed: true` в PromptContextLog.
+
+---
+
+## 11. API и SSE
+
+### 11.1 `POST /api/documentation`
+
+* Body: `{ urls: string[], forceRefresh?: boolean }`
+* Response: `{ ok: true, rawMarkdown: string, chunks: Array<{id, title, size, preview}>, sourceUrls: string[] }`
+
+### 11.2 `POST /api/analyze` (SSE)
+
+* Body: `{ blobUrl, fileName, fileType, documentation, links, options, notionDatabaseId, requestMeta, diagramPages? }`
+* События:
+
+  * `status` — этап и % прогресса
+  * `token` — потоковые токены модели
+  * `result` — финальный `{ analysis, notionPageId, telegramMessageId }`
+
+### 11.3 `POST /api/notion`
+
+* Создание/обновление страницы. Возвращает `{ notionPageId, notionUrl }`.
+
+### 11.4 `POST /api/telegram/send`
+
+* Отправка `post|reply|dm` (только с серверным секретом).
+
+### 11.5 `POST /api/telegram/webhook`
+
+* Обработка `callback_query` и ForceReply. Проверка секрета.
+
+### 11.6 `GET /api/review/:id`
+
+* Статус заявки для UI.
+
+---
+
+## 12. KV и идемпотентность
+
+Ключи:
+
+* `review:{id}` → `ReviewRequest`
+* `tg:user:{username}` → `{ userId, firstName, lastName, registered }`
+* `pending-reply:{chatId}:{messageId}` → `{ requestId, type }`
+* `docs-cache:{url}:{hash}` → `{ markdown, chunks, timestamp }`
+* `analysis-cache:{blobHash}:{docsHash}` → `{ result, timestamp }`
+
+Повторы операций Notion/Telegram защищены проверкой уже сохранённых `pageId/messageId`.
+
+---
+
+## 13. Безопасность
+
+* Проверка секрета вебхука Telegram.
+* CORS — только свой origin. CSP в vercel.json.
+* Санитизация Markdown перед Telegram (экранирование спецсимволов).
+* Все токены — только на сервере.
+* Валидация доменов для документации (`ALLOWED_DOC_DOMAINS`).
+
+---
+
+## 14. UI Компоненты
+
+### 14.1 Главная страница (app/page.tsx)
+
+* Левая колонка: форма (обязательные поля: `Project name`, `Telegram username`, `Quota Link`, файл).
+* Правая колонка: прогресс‑шаги (SSE), результат анализа, ссылки на Notion/Telegram.
+
+### 14.2 FileUpload.tsx
+
+```tsx
+'use client';
+
+import { useState, useCallback } from 'react';
+import { useDropzone } from 'react-dropzone';
+import { Card } from '@/app/components/ui/card';
+import { Button } from '@/app/components/ui/button';
+import { Upload, FileText, X } from 'lucide-react';
+
+interface FileUploadProps {
+  onFileSelect: (file: File) => void;
+  selectedFile: File | null;
+}
+
+export function FileUpload({ onFileSelect, selectedFile }: FileUploadProps) {
+  const onDrop = useCallback((acceptedFiles: File[]) => {
+    if (acceptedFiles.length > 0) {
+      onFileSelect(acceptedFiles[0]);
+    }
+  }, [onFileSelect]);
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: {
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+      'application/pdf': ['.pdf']
+    },
+    maxFiles: 1,
+    maxSize: 50 * 1024 * 1024 // 50MB
+  });
+
+  return (
+    <Card className="p-6">
+      <div
+        {...getRootProps()}
+        className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors
+          ${isDragActive ? 'border-primary bg-primary/10' : 'border-gray-300 hover:border-primary'}`}
+      >
+        <input {...getInputProps()} />
+        {selectedFile ? (
+          <div className="flex items-center justify-center space-x-2">
+            <FileText className="w-8 h-8 text-primary" />
+            <span className="font-medium">{selectedFile.name}</span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                onFileSelect(null as any);
+              }}
+            >
+              <X className="w-4 h-4" />
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <Upload className="w-12 h-12 text-gray-400 mx-auto" />
+            <div>
+              <p className="text-lg font-medium">
+                {isDragActive ? 'Отпустите файл здесь' : 'Загрузите документ'}
+              </p>
+              <p className="text-gray-500">Перетащите .docx или .pdf файл или нажмите для выбора</p>
+              <p className="text-sm text-gray-400 mt-2">Максимум 50MB</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+```
+
+### 14.3 ProcessingStatus.tsx
+
+```tsx
+'use client';
+
+import { Card } from '@/app/components/ui/card';
+import { Progress } from '@/app/components/ui/progress';
+import { Loader2, AlertTriangle } from 'lucide-react';
+import { ProcessingStatus as ProcessingStatusType } from '@/app/types';
+
+interface ProcessingStatusProps {
+  status: ProcessingStatusType;
+}
+
+export function ProcessingStatus({ status }: ProcessingStatusProps) {
+  const isError = status.stage === 'error';
+
+  return (
+    <Card className="p-6">
+      <div className="space-y-4">
+        <div className="flex items-center space-x-3">
+          {isError ? (
+            <AlertTriangle className="w-5 h-5 text-red-500" />
+          ) : (
+            <Loader2 className="w-5 h-5 animate-spin text-primary" />
+          )}
+          <h3 className="text-lg font-semibold">
+            {isError ? 'Произошла ошибка' : 'Обработка документа'}
+          </h3>
+        </div>
+        
+        <Progress value={status.progress} className="w-full" />
+        
+        <div className="text-center">
+          <p className={isError ? 'text-red-700' : 'text-gray-700'}>
+            {status.message}
+          </p>
+          <p className="text-sm text-gray-500 mt-1">
+            {status.progress}% завершено
+          </p>
+          {isError && status.error && (
+            <p className="text-xs text-red-500 mt-2">
+              Код ошибки: {status.error.code}
+            </p>
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+```
+
+---
+
+## 15. Деплой (Quick Start)
+
+### 15.1 Установка зависимостей
+
+```bash
+npx create-next-app@latest document-analyzer --typescript --tailwind --eslint --app --src-dir=false --import-alias "@/*"
+cd document-analyzer
+
+# Основные зависимости
+npm install @anthropic-ai/sdk @notionhq/client pdfjs-dist mammoth turndown cheerio 
+npm install @vercel/blob @vercel/kv zod class-variance-authority clsx tailwind-merge
+npm install lucide-react @radix-ui/react-dialog @radix-ui/react-progress @radix-ui/react-toast
+npm install react-dropzone sharp canvas
+
+# Dev зависимости  
+npm install -D @types/node @types/turndown @types/cheerio
+
+# shadcn/ui setup
+npx shadcn-ui@latest init -y
+npx shadcn-ui@latest add button card input progress toast dialog textarea
+```
+
+### 15.2 Настройка проекта
+
+1. Создай репозиторий и проект Vercel.
+2. Заполни **все env** из `.env.example`.
+3. Включи **Vercel Blob** и **Vercel KV** в настройках проекта.
+4. Деплой.
+
+### 15.3 Настройка Telegram бота
+
+```bash
+# Установить webhook
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url":"'$NEXT_PUBLIC_APP_URL'/api/telegram/webhook",
+    "secret_token":"'$TELEGRAM_WEBHOOK_SECRET'",
+    "allowed_updates": ["message", "callback_query"]
+  }'
+
+# Проверить статус
+curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
+```
+
+### 15.4 Первый запуск
+
+1. Нажми **Start** у бота в Telegram.
+2. Открой приложение, отправь первую заявку.
+3. Проверь создание страницы в Notion и пост в канале.
+
+---
+
+## 16. Шаблон сообщения в канал
+
+```markdown
+🔍 **Новая заявка на анализ документов**
+
+**Проект:** {PROJECT_NAME}
+**Заявитель:** {REQUESTER_MENTION}
+
+**📋 Детали:**
+• **Процесс:** {PROCESS_SHORT}
+• **Типы документов:** {DOC_TYPES_SHORT}  
+• **Объём:** {VOLUME_TEXT}
+• **ARR:** {ARR_RUB} ₽
+• **ACV:** {ACV_RUB} ₽
+• **Размещение:** {PLACEMENT}
+
+**🎯 Оценка:**
+• **Реализуемость:** {FEASIBILITY} ({CONFIDENCE}% уверенность)
+• **Сроки:** {TIMELINE}
+• **Основные риски:** {TOP_MISSING}
+
+**🔗 Ссылки:**
+• [Квота]({QUOTA_LINK})
+• [ТЗ]({TZ_LINK})
+• [Pipedrive]({PIPEDRIVE_LINK})
+• [Примеры]({EXAMPLES_LINK})
+• [Исходный файл]({BLOB_URL})
+
+📊 **Подробности:** {NOTION_URL}
+
+{MENTION_REVIEWERS}
+```
+
+---
+
+## 17. Acceptance (жёсткие критерии)
+
+* [ ] **Нет скрытых фолбеков.** Любая критическая ошибка останавливает процесс. Код виден в UI, логах, KV.
+* [ ] **AI‑first.** Выбор изображений страниц и чанков документации — моделью; эвристики только по флагу.
+* [ ] **Strict JSON.** При `STRICT_ERRORS=true` без автопочинки. Ошибка → `MODEL_INVALID_JSON`.
+* [ ] **Budget guard.** Оценка токенов/стоимости; при риске — сжатие входа моделью. Не удалось — `BUDGET_EXCEEDED`.
+* [ ] **Notion.** Страница создаётся только при успешном анализе; заполнены свойства, блоки, **PromptContextLog**. Ошибка → `NOTION_ERROR`, Telegram не запускается.
+* [ ] **Telegram.** Пост с кнопками; `Approve/Reject/Add information` обновляют `Decision`, `Last Action`, `Last Action At`, `Last Moderator (TG)`; публикуются реплаи, DM заявителю.
+* [ ] **KV.** Заявки, пользователи TG, ожидания ForceReply, кэши — сохранены; повторы не дублируют операции.
+* [ ] **SSE.** Поток `status/token/result` работает, прогресс отображается.
+* [ ] **Security.** Секрет вебхука проверяется; CORS/CSP включены; токены не утекли на клиент.
+* [ ] **Деплой.** Vercel проходит без ручных правок; smoke‑тесты успешны.
+
+---
+
+## 18. Troubleshooting (добавить в README)
+
+* **MODEL\_INVALID\_JSON** — модель вернула невалидный JSON. При `STRICT_ERRORS=true` — предложить «Повторить анализ»; при `false` — одна авто‑попытка фикс с пометкой `autoFixed`.
+* **RATE\_LIMIT / 429** — активируются ретраи с backoff. При неудаче показать сообщение пользователю.
+* **NOTION\_ERROR** — проверить токен, права интеграции, имена свойств (или задать `NOTION_PROPERTY_MAP`).
+* **TELEGRAM\_POST\_ERROR** — проверь `TELEGRAM_CHANNEL_ID`, права бота (admin), секрет вебхука.
+* **USERNAME\_NOT\_REGISTERED** — пользователь не нажал Start у бота.
+* **AI\_DISABLE\_UPLOADS=true** — анализ отключён политикой безопасности.
+
+---
+
+## 19. Инструкции для Cursor (КРИТИЧНО)
+
+### 19.1 Создание проекта
+
+1. **Инициализация:**
+   ```bash
+   npx create-next-app@latest document-analyzer --typescript --tailwind --eslint --app --src-dir=false --import-alias "@/*"
+   cd document-analyzer
+   ```
+
+2. **Установка всех зависимостей** (точно по списку из 15.1)
+
+3. **Создание файлов:**
+   - Сначала создай **ВСЕ** файлы из структуры (раздел 2)
+   - Добавь содержимое конфигурационных файлов (5.1-5.4)
+   - Создай типы данных (раздел 4)
+   - Реализуй все API endpoints (раздел 11)
+   - Создай UI компоненты (раздел 14)
+
+### 19.2 Ключевые моменты реализации
+
+**app/lib/config.ts** — центральная конфигурация:
+```ts
+export const config = {
+  anthropic: {
+    apiKey: process.env.ANTHROPIC_API_KEY!,
+    model: process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022',
+    maxInputTokens: parseInt(process.env.AI_MAX_INPUT_TOKENS || '180000'),
+    maxImages: parseInt(process.env.AI_MAX_IMAGES || '10'),
+    // ... остальные настройки
+  },
+  notion: {
+    token: process.env.NOTION_TOKEN!,
+    databaseId: process.env.NOTION_DATABASE_ID!,
+    propertyMap: JSON.parse(process.env.NOTION_PROPERTY_MAP || '{}'),
+  },
+  // ... остальные разделы
+};
+```
+
+**Строгая типизация** — все интерфейсы должны быть реализованы точно как в разделе 4.
+
+**Error handling** — каждая функция должна возвращать либо успешный результат, либо объект с `ErrorCode`.
+
+**SSE implementation** — `/api/analyze` должен отправлять события `status`, `token`, `result`.
+
+### 19.3 Порядок реализации
+
+1. **Базовая структура** — файлы, типы, конфиг
+2. **Утилиты** — blob, cache, security, utils  
+3. **Обработка документов** — docx.ts, pdf.ts
+4. **AI интеграция** — claude.ts с тремя типами вызовов
+5. **Внешние API** — notion.ts, telegram.ts
+6. **API endpoints** — все routes
+7. **UI компоненты** — по порядку сложности
+8. **Главная страница** — интеграция всех компонентов
+
+### 19.4 Проверка перед деплоем
+
+* `npm run build` проходит без ошибок
+* Все env переменные из .env.example проверены
+* TypeScript strict mode включен
+* Нет консольных предупреждений
+* Все import/export корректны
+
+---
+
+## 20. Пример значений для тестирования
+
+* `PROJECT_NAME`: `euroins.kz - страховые документы`
+* `PROCESS_SHORT`: `Проверка состава пакета документов при страховом случае по типу случая, извлечение полей из каждого документа`
+* `DOC_TYPES_SHORT`: `договор, удостоверение личности, свидетельства, мед. формы, справки`
+* `VOLUME_TEXT`: `93 000 – 120 000 страниц в месяц`
+* `ARR_RUB`: `3000000`
+* `ACV_RUB`: `12000000`
+* `PLACEMENT`: `Cloud`
+
+---
+
+**ГОТОВО.** Этот документ — финальная спецификация. Скопируй полностью в Cursor, следуй инструкциям раздела 19, и получишь полностью рабочее приложение.
