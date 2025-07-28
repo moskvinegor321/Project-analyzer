@@ -1,0 +1,38 @@
+# Document Analyzer AI-First Project Rules
+
+## Архитектура
+- Next.js 14+ App Router ТОЛЬКО
+- TypeScript strict mode обязательно
+- Все типы в app/types/index.ts
+- Конфигурация в app/lib/config.ts
+- Никакого хардкода - все через env переменные
+
+## AI-First подход
+- Выбор изображений/чанков ВСЕГДА через модель
+- Эвристики только как fallback по флагу
+- Строгая валидация JSON ответов модели
+- Budget guard перед каждым вызовом модели
+
+## Error Handling
+- Enum коды ошибок
+- STRICT_ERRORS=true по умолчанию - без автофиксов
+- Любая критическая ошибка останавливает процесс
+- Полное логирование в KV и Notion
+
+## API Design
+- SSE для длительных операций
+- Идемпотентность через requestId
+- Валидация всех входящих данных
+- Proper HTTP status codes
+
+## Security
+- Telegram webhook secret проверка
+- CORS только для своего домена
+- Санитизация всех пользовательских данных
+- Никаких токенов на клиенте
+
+## Styling
+- Tailwind CSS классы только
+- shadcn/ui компоненты
+- Responsive design обязательно
+- Dark/light theme support 

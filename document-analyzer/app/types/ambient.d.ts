@@ -1,0 +1,10 @@
+declare module 'mammoth';
+declare module 'turndown';
+declare module '@vercel/blob';
+declare module '@vercel/kv';
+declare module 'canvas';
+declare module 'pdfjs-dist/legacy/build/pdf.js';
+declare module 'next/server';
+declare module '@anthropic-ai/sdk';
+declare module 'buffer';
+declare module 'crypto'; 

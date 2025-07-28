@@ -1,0 +1,9 @@
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "default",
+  "tailwindcss": {
+    "config": "tailwind.config.js"
+  },
+  "rsc": false,
+  "typescript": true
+} 
