@@ -8,168 +8,190 @@ import { DocumentationInput } from '@/app/components/DocumentationInput';
 import { AnalysisResult, ProcessingStatus as StatusType } from '@/app/types';
 import { Button } from '@/app/components/ui/button';
 import { arrayBufferToBase64 } from '@/app/lib/utils';
-import { Play, Sparkles, Zap } from 'lucide-react';
+import { Play, FileText, Globe, Zap, Brain, Send } from 'lucide-react';
 
 export function SubmitForm() {
   const [file, setFile] = useState<File | null>(null);
   const [docUrls, setDocUrls] = useState<string[]>([]);
   const [status, setStatus] = useState<StatusType | null>(null);
-  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [result, setResult] = useState<AnalysisResult | null>(null);
 
-  async function handleSubmit() {
+  const handleSubmit = async () => {
     if (!file) return;
-    
-    setIsAnalyzing(true);
-    setStatus(null);
-    setAnalysis(null);
-    
-    try {
-      // Step 1 fetch documentation
-      let documentation: any = null;
-      if (docUrls.length) {
-        const res = await fetch('/api/documentation', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ urls: docUrls }),
-        });
-        const data = await res.json();
-        documentation = { rawMarkdown: data.rawMarkdown };
-      }
 
-      // Step 2 analyze with SSE
-      const reader = new TextDecoderStream();
-      const resp = await fetch('/api/analyze', {
+    setStatus({ stage: 'uploading', progress: 0, message: 'Starting upload...' });
+    setResult(null);
+
+    try {
+      const fileBuffer = await file.arrayBuffer();
+      const base64File = arrayBufferToBase64(fileBuffer);
+
+      setStatus({ stage: 'analyzing', progress: 50, message: 'Analyzing document...' });
+
+      const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          payload: {
-            projectName: 'Test',
-            telegramUsername: '@tester',
-            documentationUrls: docUrls,
-            quotaLink: 'https://example.com',
-            blobUrl: '',
-            fileName: file.name,
-          },
-          file: {
-            name: file.name,
-            type: file.type,
-            data: await file.arrayBuffer().then((b) => arrayBufferToBase64(b)),
-          },
-          documentation,
-        }),
+          file: base64File,
+          filename: file.name,
+          mimeType: file.type,
+          docUrls: docUrls
+        })
       });
-      if (!resp.body) return;
-      const stream = resp.body.pipeThrough(reader).getReader();
-      let buffer = '';
-      while (true) {
-        const { value, done } = await stream.read();
-        if (done) break;
-        buffer += value;
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop() || '';
-        for (const chunk of parts) {
-          const [eventLine, dataLine] = chunk.split('\n');
-          const event = eventLine.replace('event: ', '').trim();
-          const data = JSON.parse(dataLine.replace('data: ', ''));
-          if (event === 'status') setStatus(data);
-          if (event === 'result') setAnalysis(data.analysis);
-        }
+
+      if (!response.ok) {
+        throw new Error(`Analysis failed: ${response.statusText}`);
       }
+
+      const data = await response.json();
+      setResult(data);
+      setStatus({ stage: 'completed', progress: 100, message: 'Analysis complete!' });
     } catch (error) {
       console.error('Analysis failed:', error);
-    } finally {
-      setIsAnalyzing(false);
+      setStatus({ 
+        stage: 'error', 
+        progress: 0, 
+        message: 'Analysis failed', 
+        error: { code: 'UPLOAD_ERROR', details: error instanceof Error ? error.message : 'Unknown error' }
+      });
     }
-  }
+  };
 
-  const canAnalyze = file && !isAnalyzing;
+  const isReady = file && (!status || status.stage === 'completed' || status.stage === 'error');
 
   return (
     <div className="space-y-8">
-      {/* Form Section */}
-      <div className="grid gap-8 lg:grid-cols-2">
-        {/* Left column: Upload and Documentation */}
-        <div className="space-y-6">
-          <FileUpload selectedFile={file} onFileSelect={setFile} />
-          <DocumentationInput urls={docUrls} onChange={setDocUrls} />
-        </div>
-
-        {/* Right column: Action and Status */}
-        <div className="space-y-6">
-          {/* Analysis Button */}
-          <div className="space-y-4">
-            <div className="flex items-center gap-2 mb-4">
-              <Sparkles className="w-5 h-5 text-amber-500" />
-              <h3 className="text-lg font-semibold text-slate-800">Запуск анализа</h3>
-            </div>
-            
-            <div className="p-6 bg-gradient-to-br from-amber-50 to-orange-50 rounded-2xl border border-amber-200">
-              <div className="space-y-4">
-                <div className="text-center">
-                  <div className="w-16 h-16 bg-gradient-to-br from-amber-400 to-orange-500 rounded-2xl mx-auto mb-4 flex items-center justify-center shadow-lg">
-                    <Zap className="w-8 h-8 text-white" />
-                  </div>
-                  <h4 className="text-lg font-semibold text-slate-800 mb-2">
-                    AI Document Analyzer
-                  </h4>
-                  <p className="text-sm text-slate-600 mb-6">
-                    Получите структурированный анализ документа с автоматическим созданием отчёта в Notion и уведомлением в Telegram
-                  </p>
-                </div>
-
-                <Button 
-                  onClick={handleSubmit}
-                  disabled={!canAnalyze}
-                  className={`w-full py-4 px-6 text-lg font-semibold rounded-xl transition-all duration-300 ${
-                    canAnalyze
-                      ? 'bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white shadow-lg hover:shadow-xl transform hover:scale-105'
-                      : 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                  }`}
-                >
-                  {isAnalyzing ? (
-                    <>
-                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-3" />
-                      Анализирую документ...
-                    </>
-                  ) : (
-                    <>
-                      <Play className="w-5 h-5 mr-3" />
-                      Запустить анализ
-                    </>
-                  )}
-                </Button>
-
-                {!file && (
-                  <p className="text-xs text-amber-600 text-center">
-                    💡 Сначала загрузите документ для анализа
-                  </p>
-                )}
+      {/* Main grid layout - KATALOG style */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        
+        {/* Left column - File upload and documentation */}
+        <div className="lg:col-span-2 space-y-6">
+          
+          {/* File Upload Section */}
+          <div className="bg-card border border-border rounded-xl p-6 backdrop-blur-sm">
+            <div className="flex items-center space-x-3 mb-4">
+              <div className="w-8 h-8 rounded-lg bg-media-movie/20 flex items-center justify-center">
+                <FileText className="w-4 h-4 text-media-movie" />
+              </div>
+              <div>
+                <h3 className="font-heading text-foreground">Upload Document</h3>
+                <p className="font-heading-xs text-muted-foreground">PDF or DOCX files up to 50MB</p>
               </div>
             </div>
+            
+            <FileUpload onFileSelect={setFile} selectedFile={file} />
           </div>
 
-          {/* Status Display */}
-          {status && (
-            <div className="space-y-4">
-              <ProcessingStatus status={status} />
+          {/* Documentation URLs Section */}
+          <div className="bg-card border border-border rounded-xl p-6 backdrop-blur-sm">
+            <div className="flex items-center space-x-3 mb-4">
+              <div className="w-8 h-8 rounded-lg bg-media-tv/20 flex items-center justify-center">
+                <Globe className="w-4 h-4 text-media-tv" />
+              </div>
+              <div>
+                <h3 className="font-heading text-foreground">Documentation Links</h3>
+                <p className="font-heading-xs text-muted-foreground">Additional context for precise analysis</p>
+              </div>
             </div>
-          )}
+            
+            <DocumentationInput urls={docUrls} onChange={setDocUrls} />
+          </div>
+        </div>
+
+        {/* Right column - Analysis panel */}
+        <div className="space-y-6">
+          
+          {/* Analysis Control Panel */}
+          <div className="bg-card border border-border rounded-xl p-6 backdrop-blur-sm">
+            <div className="text-center space-y-4 mb-6">
+              <div className="w-16 h-16 mx-auto rounded-2xl bg-media-book/20 flex items-center justify-center">
+                <Brain className="w-8 h-8 text-media-book" />
+              </div>
+              
+              <div>
+                <h3 className="font-heading-lg text-foreground mb-2">AI Document Analyzer</h3>
+                <p className="font-heading-xs text-muted-foreground leading-relaxed">
+                  Get structured analysis with automatic categorization and insights extraction
+                </p>
+              </div>
+            </div>
+
+            {/* Features list */}
+            <div className="space-y-3 mb-6">
+              {[
+                { icon: <Zap className="w-4 h-4" />, text: "Claude AI Analysis", color: "text-media-movie" },
+                { icon: <FileText className="w-4 h-4" />, text: "Structured Output", color: "text-media-tv" },
+                { icon: <Send className="w-4 h-4" />, text: "Notion Integration", color: "text-media-album" },
+              ].map((feature, index) => (
+                <div key={index} className="flex items-center space-x-3">
+                  <div className={feature.color}>
+                    {feature.icon}
+                  </div>
+                  <span className="font-heading-sm text-muted-foreground">{feature.text}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Action button */}
+            <Button
+              onClick={handleSubmit}
+              disabled={!isReady}
+              className={`w-full h-12 rounded-xl font-heading transition-all duration-300 ${
+                isReady 
+                  ? 'btn-primary hover:scale-105' 
+                  : 'bg-muted/20 text-muted-foreground cursor-not-allowed border border-border/20'
+              }`}
+            >
+              {(!status || status.stage === 'completed' || status.stage === 'error') && (
+                <>
+                  <Play className="w-5 h-5 mr-2" />
+                  Start Analysis
+                </>
+              )}
+              {status && status.stage !== 'completed' && status.stage !== 'error' && (
+                <>
+                  <div className="w-5 h-5 mr-2 animate-spin border-2 border-white/30 border-t-white rounded-full" />
+                  Processing...
+                </>
+              )}
+            </Button>
+
+            {/* Status info */}
+            {file && (
+              <div className="pt-4 border-t border-border/20 mt-4">
+                <div className="font-heading-xs text-muted-foreground space-y-1">
+                  <div className="flex justify-between">
+                    <span>Selected file:</span>
+                    <span className="text-foreground font-medium">{file.name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Size:</span>
+                    <span className="text-foreground">{(file.size / 1024 / 1024).toFixed(1)} MB</span>
+                  </div>
+                  {docUrls.length > 0 && (
+                    <div className="flex justify-between">
+                      <span>Context URLs:</span>
+                      <span className="text-foreground">{docUrls.length}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Results Section */}
-      {analysis && (
-        <div className="mt-8">
-          <div className="bg-gradient-to-br from-green-50 to-emerald-50 rounded-2xl border border-green-200 p-8">
-            <div className="flex items-center gap-2 mb-6">
-              <div className="w-8 h-8 bg-gradient-to-br from-green-400 to-emerald-500 rounded-lg flex items-center justify-center">
-                <Sparkles className="w-4 h-4 text-white" />
-              </div>
-              <h3 className="text-xl font-semibold text-slate-800">Результаты анализа</h3>
-            </div>
-            <AnalysisResultView result={analysis} />
-          </div>
+      {/* Processing Status */}
+      {status && status.stage !== 'completed' && (
+        <div className="bg-card border border-border rounded-xl p-6 backdrop-blur-sm">
+          <ProcessingStatus status={status} />
+        </div>
+      )}
+
+      {/* Results */}
+      {result && (
+        <div className="bg-card border border-border rounded-xl p-6 backdrop-blur-sm">
+          <AnalysisResultView result={result} />
         </div>
       )}
     </div>

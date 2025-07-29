@@ -1,8 +1,8 @@
-'use client';
-import React, { useState, ChangeEvent } from 'react';
-import { Card } from '@/app/components/ui/card';
+"use client";
+
+import { useState } from 'react';
 import { Button } from '@/app/components/ui/button';
-import { BookOpen, Plus, Link, X, ExternalLink } from 'lucide-react';
+import { Plus, X, Link, Globe, ExternalLink } from 'lucide-react';
 
 interface DocumentationInputProps {
   urls: string[];
@@ -10,132 +10,192 @@ interface DocumentationInputProps {
 }
 
 export function DocumentationInput({ urls, onChange }: DocumentationInputProps) {
-  const [input, setInput] = useState('');
+  const [inputValue, setInputValue] = useState('');
+  const [isInputFocused, setIsInputFocused] = useState(false);
 
-  function addUrl() {
-    const url = input.trim();
-    if (!url) return;
-    onChange([...urls, url]);
-    setInput('');
-  }
-
-  function removeUrl(idx: number) {
-    onChange(urls.filter((_, i) => i !== idx));
-  }
-
-  function handleKeyPress(e: React.KeyboardEvent) {
-    if (e.key === 'Enter') {
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && inputValue.trim()) {
       e.preventDefault();
       addUrl();
     }
-  }
+  };
+
+  const addUrl = () => {
+    if (inputValue.trim() && !urls.includes(inputValue.trim())) {
+      onChange([...urls, inputValue.trim()]);
+      setInputValue('');
+    }
+  };
+
+  const removeUrl = (urlToRemove: string) => {
+    onChange(urls.filter(url => url !== urlToRemove));
+  };
+
+  const clearAll = () => {
+    onChange([]);
+  };
+
+  const isValidUrl = (url: string) => {
+    try {
+      new URL(url);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const getDomainFromUrl = (url: string) => {
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return url;
+    }
+  };
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2 mb-4">
-        <BookOpen className="w-5 h-5 text-purple-600" />
-        <h3 className="text-lg font-semibold text-slate-800">Дополнительная документация</h3>
-      </div>
-      
-      <Card className="border-0 shadow-sm bg-gradient-to-br from-slate-50 to-purple-50/50 p-6">
-        <div className="space-y-4">
-          <p className="text-sm text-slate-600 mb-4">
-            Добавьте ссылки на техническую документацию для более точного анализа
-          </p>
-          
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Link className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400" />
-              <input
-                type="url"
-                placeholder="https://docs.example.com/api"
-                value={input}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => setInput(e.target.value)}
-                onKeyPress={handleKeyPress}
-                className="w-full pl-10 pr-4 py-3 border border-slate-200 rounded-xl bg-white/80 backdrop-blur-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all duration-200 placeholder:text-slate-400"
-              />
+      {/* Input section */}
+      <div className="space-y-3">
+        <div className="relative">
+          <div className={`
+            relative flex items-center rounded-lg border transition-all duration-200
+            ${isInputFocused 
+              ? 'border-media-tv/50 bg-card/50' 
+              : 'border-border/30 bg-card/30 hover:border-border/50'
+            }
+          `}>
+            {/* Input icon */}
+            <div className="flex items-center justify-center w-10 h-10">
+              <Link className={`
+                w-4 h-4 transition-colors duration-200
+                ${isInputFocused ? 'text-media-tv' : 'text-muted-foreground'}
+              `} />
             </div>
-            <Button 
-              onClick={addUrl} 
-              disabled={!input.trim()}
-              className="px-6 py-3 bg-gradient-to-r from-purple-500 to-blue-500 hover:from-purple-600 hover:to-blue-600 text-white rounded-xl transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg"
-            >
-              <Plus className="w-4 h-4 mr-2" />
-              Добавить
-            </Button>
+            
+            {/* Input field */}
+            <input
+              type="url"
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              onKeyPress={handleKeyPress}
+              onFocus={() => setIsInputFocused(true)}
+              onBlur={() => setIsInputFocused(false)}
+              placeholder="https://docs.example.com"
+              className="flex-1 h-10 bg-transparent border-0 outline-none font-heading-sm text-foreground placeholder:text-muted-foreground/60"
+            />
+            
+            {/* Add button */}
+            <div className="pr-2">
+              <Button
+                onClick={addUrl}
+                disabled={!inputValue.trim() || urls.includes(inputValue.trim())}
+                className={`
+                  w-8 h-8 rounded-md border-0 p-0 transition-all duration-200
+                  ${inputValue.trim() && !urls.includes(inputValue.trim())
+                    ? 'bg-media-tv/20 hover:bg-media-tv/30 text-media-tv'
+                    : 'bg-muted/10 text-muted-foreground/50 cursor-not-allowed'
+                  }
+                `}
+              >
+                <Plus className="w-4 h-4" />
+              </Button>
+            </div>
           </div>
           
-          {urls.length > 0 && (
-            <div className="space-y-3 mt-6">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-slate-700">
-                  Добавленные ссылки ({urls.length})
-                </span>
-                {urls.length > 0 && (
-                  <Button
-                    variant="ghost"
-                    onClick={() => onChange([])}
-                    className="text-xs text-slate-500 hover:text-red-600 p-1"
-                  >
-                    Очистить все
-                  </Button>
-                )}
-              </div>
-              
-              <div className="space-y-2">
-                {urls.map((url, idx) => (
-                  <div 
-                    key={idx} 
-                    className="flex items-center justify-between p-3 bg-white/60 backdrop-blur-sm rounded-lg border border-slate-200/50 group hover:shadow-md transition-all duration-200"
-                  >
-                    <div className="flex items-center gap-3 flex-1 min-w-0">
-                      <div className="flex-shrink-0">
-                        <div className="w-8 h-8 bg-gradient-to-br from-purple-100 to-blue-100 rounded-lg flex items-center justify-center">
-                          <ExternalLink className="w-4 h-4 text-purple-600" />
-                        </div>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-slate-800 truncate">{url}</p>
-                        <p className="text-xs text-slate-500">Документация #{idx + 1}</p>
-                      </div>
-                    </div>
-                    
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        onClick={() => window.open(url, '_blank')}
-                        className="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-blue-50"
-                        title="Открыть ссылку"
-                      >
-                        <ExternalLink className="w-3 h-3 text-blue-600" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        onClick={() => removeUrl(idx)}
-                        className="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-red-50"
-                        title="Удалить ссылку"
-                      >
-                        <X className="w-3 h-3 text-red-600" />
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          
-          {urls.length === 0 && (
-            <div className="text-center py-8">
-              <div className="w-16 h-16 bg-gradient-to-br from-purple-100 to-blue-100 rounded-2xl mx-auto mb-4 flex items-center justify-center">
-                <BookOpen className="w-8 h-8 text-purple-500" />
-              </div>
-              <p className="text-sm text-slate-500">
-                Пока нет добавленных ссылок на документацию
-              </p>
-            </div>
+          {/* Validation feedback */}
+          {inputValue.trim() && !isValidUrl(inputValue) && (
+            <p className="text-xs text-destructive mt-1 font-heading-xs">
+              Please enter a valid URL
+            </p>
           )}
         </div>
-      </Card>
+      </div>
+
+      {/* URLs list */}
+      {urls.length > 0 && (
+        <div className="space-y-3">
+          {/* Header with clear all */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <Globe className="w-4 h-4 text-muted-foreground" />
+              <span className="font-heading-sm text-foreground">
+                Documentation Sources ({urls.length})
+              </span>
+            </div>
+            <Button
+              onClick={clearAll}
+              className="h-7 px-3 rounded-md bg-destructive/10 hover:bg-destructive/20 border-0 text-destructive font-heading-xs"
+            >
+              Clear All
+            </Button>
+          </div>
+
+          {/* URLs grid */}
+          <div className="space-y-2">
+            {urls.map((url, index) => (
+              <div
+                key={index}
+                className="group relative bg-muted/20 border border-border/30 rounded-lg p-3 transition-all duration-200 hover:bg-muted/30 hover:border-border/50"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-3 flex-1 min-w-0">
+                    {/* URL icon */}
+                    <div className="w-8 h-8 rounded-md bg-card border border-border/30 flex items-center justify-center flex-shrink-0">
+                      <ExternalLink className="w-4 h-4 text-media-tv" />
+                    </div>
+                    
+                    {/* URL info */}
+                    <div className="flex-1 min-w-0">
+                      <p className="font-heading-sm text-foreground truncate">
+                        {getDomainFromUrl(url)}
+                      </p>
+                      <p className="font-heading-xs text-muted-foreground truncate">
+                        {url}
+                      </p>
+                    </div>
+                  </div>
+                  
+                  {/* Actions */}
+                  <div className="flex items-center space-x-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                    <Button
+                      onClick={() => window.open(url, '_blank')}
+                      className="w-7 h-7 rounded-md bg-card/50 hover:bg-card border border-border/30 p-0"
+                    >
+                      <ExternalLink className="w-3 h-3 text-muted-foreground" />
+                    </Button>
+                    <Button
+                      onClick={() => removeUrl(url)}
+                      className="w-7 h-7 rounded-md bg-destructive/10 hover:bg-destructive/20 border-0 p-0"
+                    >
+                      <X className="w-3 h-3 text-destructive" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Summary */}
+          <div className="bg-card/30 border border-border/20 rounded-lg p-3">
+            <p className="font-heading-xs text-muted-foreground text-center">
+              {urls.length} documentation {urls.length === 1 ? 'source' : 'sources'} added for enhanced analysis context
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Empty state */}
+      {urls.length === 0 && (
+        <div className="text-center py-6">
+          <div className="w-12 h-12 mx-auto rounded-2xl bg-muted/20 flex items-center justify-center mb-3">
+            <Globe className="w-6 h-6 text-muted-foreground" />
+          </div>
+          <p className="font-heading text-muted-foreground mb-1">No documentation URLs added</p>
+          <p className="font-heading-xs text-muted-foreground/60">
+            Add documentation links to improve analysis accuracy
+          </p>
+        </div>
+      )}
     </div>
   );
 } 
